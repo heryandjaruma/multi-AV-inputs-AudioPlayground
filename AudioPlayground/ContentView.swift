@@ -7,13 +7,13 @@
 
 import SwiftUI
 import AVFoundation
-import Combine
 
+@Observable
 @MainActor
-final class AudioBufferMonitor: ObservableObject {
-    @Published var lastFrameCount: AVAudioFrameCount = 0
-    @Published var pushCount: Int = 0
-    @Published var history: [AVAudioPCMBuffer] = []
+final class AudioBufferMonitor {
+    var lastFrameCount: AVAudioFrameCount = 0
+    var pushCount: Int = 0
+    var history: [AVAudioPCMBuffer] = []
     
     private let engine = AVAudioEngine()
     
@@ -52,10 +52,8 @@ final class AudioBufferMonitor: ObservableObject {
     
 }
 
-
 struct ContentView: View {
-    
-    @StateObject private var monitor = AudioBufferMonitor()
+    @State private var monitor = AudioBufferMonitor()
     @State private var isRunning = false
     
     var body: some View {
