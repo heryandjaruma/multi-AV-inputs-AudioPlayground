@@ -6,56 +6,68 @@
 //
 
 import SwiftUI
-import AVFAudio
+import AVFoundation
+import Combine
+
+@MainActor
+final class AudioBufferMonitor: ObservableObject {
+    @Published var lastFrameCount: AVAudioFrameCount = 0
+    @Published var pushCount: Int = 0
+    @Published var history: [AVAudioPCMBuffer] = []
+    
+    private let engine = AVAudioEngine()
+    
+    func start() {
+        let input = engine.inputNode // get the input node
+        let format = input.inputFormat(forBus: 0)
+        
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+            guard let self else { return }
+            
+            let lastFrameCount = buffer.frameLength
+            
+            Task { @MainActor in
+                self.lastFrameCount = lastFrameCount
+                self.pushCount += 1
+                self.history.append(buffer)
+                if self.history.count > 20 {
+                    self.history.removeFirst()
+                }
+            }
+        }
+        
+        do {
+            try engine.start()
+        } catch {
+            print("Engine start failed: \(error)")
+        }
+    }
+    
+    func stop() {
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        pushCount = 0
+        history.removeAll()
+    }
+    
+}
+
 
 struct ContentView: View {
     
-    @State private var recorder: AVAudioRecorder?
-    @State private var player: AVAudioPlayer?
-    @State private var isRecording = false
-    
-    private let fileUrl = FileManager.default.temporaryDirectory.appendingPathComponent("clip.m4a")
+    @StateObject private var monitor = AudioBufferMonitor()
+    @State private var isRunning = false
     
     var body: some View {
-        VStack {
-            Button(isRecording ? "Stop" : "Record") {
-                isRecording ? stop() : record()
+        VStack(spacing: 16) {
+            Text("Last buffer: \(monitor.lastFrameCount) frames")
+            Text("Pushes: \(monitor.pushCount)")
+            Button(isRunning ? "Stop" : "Start") {
+                isRunning.toggle()
+                isRunning ? monitor.start() : monitor.stop()
             }
-            Button("Play") {
-                player = try? AVAudioPlayer(contentsOf: fileUrl)
-                player?.play()
-            }
-        }
-        .onAppear {
-            AVAudioApplication.requestRecordPermission { granted in
-                print("Mic permission granted: \(granted)")
-                
-            }
-            try? AVAudioSession.sharedInstance().setCategory(.playAndRecord, options: [.defaultToSpeaker])
-            try? AVAudioSession.sharedInstance().setActive(true)
         }
         .padding()
-    }
-    
-    private func record() {
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 44100,
-            AVNumberOfChannelsKey: 1
-        ]
-        do {
-            recorder = try AVAudioRecorder(url: fileUrl, settings: settings)
-            recorder?.record()
-            isRecording = true
-        } catch {
-            print("Record failed: \(error)")
-        }
-        
-    }
-    
-    private func stop() {
-        recorder?.stop()
-        isRecording = false
     }
 }
 
