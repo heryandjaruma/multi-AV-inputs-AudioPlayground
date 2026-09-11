@@ -7,63 +7,77 @@
 
 import SwiftUI
 import AVFoundation
+import AVFAudio
 
 @Observable
 @MainActor
-final class AudioBufferMonitor {
+final class AudioBufferRecorder {
     var lastFrameCount: AVAudioFrameCount = 0
     var pushCount: Int = 0
     var history: [AVAudioPCMBuffer] = []
     
     private let engine = AVAudioEngine()
+    private let file = FileManager.default.temporaryDirectory.appending(path: "rec.caf")
     
-    func start() {
-        let input = engine.inputNode // get the input node
-        let format = input.inputFormat(forBus: 0)
+    func record() {
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        let file = try? AVAudioFile(
+            forWriting: FileManager.default.temporaryDirectory.appending(path: "rec.caf"),
+            settings: format.settings
+        )
         
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            guard let self else { return }
-            
-            let lastFrameCount = buffer.frameLength
-            
-            Task { @MainActor in
-                self.lastFrameCount = lastFrameCount
-                self.pushCount += 1
-                self.history.append(buffer)
-                if self.history.count > 20 {
-                    self.history.removeFirst()
-                }
-            }
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { avAudioPCMBuffer, time in
+            try? file?.write(from: avAudioPCMBuffer)
         }
         
         do {
             try engine.start()
         } catch {
-            print("Engine start failed: \(error)")
+            print("Error in starting engine: \(error)")
         }
     }
     
     func stop() {
-        engine.inputNode.removeTap(onBus: 0)
+        engine.inputNode.removeTap(onBus: 0 )
         engine.stop()
-        pushCount = 0
-        history.removeAll()
     }
     
+    func play() {
+        let player = AVAudioPlayerNode()
+        let format = engine.inputNode.outputFormat(forBus: 0)
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        
+        guard let readFile = try? AVAudioFile(forReading: file) else { return }
+        player.scheduleFile(readFile, at: nil)
+        try? engine.start()
+        player.play()
+    }
+    
+    func setup() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playAndRecord, options: [.defaultToSpeaker])
+        try? session.setActive(true)
+    }
 }
 
 struct ContentView: View {
-    @State private var monitor = AudioBufferMonitor()
+    @State private var recorder = AudioBufferRecorder()
     @State private var isRunning = false
     
     var body: some View {
         VStack(spacing: 16) {
-            Text("Last buffer: \(monitor.lastFrameCount) frames")
-            Text("Pushes: \(monitor.pushCount)")
-            Button(isRunning ? "Stop" : "Start") {
+            Button(isRunning ? "Stop" : "Record") {
                 isRunning.toggle()
-                isRunning ? monitor.start() : monitor.stop()
+                isRunning ? recorder.record() : recorder.stop()
             }
+            Button("Play") {
+                recorder.play()
+            }
+        }
+        .onAppear {
+            recorder.setup()
         }
         .padding()
     }
