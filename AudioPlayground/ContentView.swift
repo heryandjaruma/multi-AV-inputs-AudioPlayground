@@ -6,78 +6,89 @@
 //
 
 import SwiftUI
-import AVFoundation
-import AVFAudio
+import Network
 
 @Observable
-@MainActor
-final class AudioBufferRecorder {
-    var lastFrameCount: AVAudioFrameCount = 0
-    var pushCount: Int = 0
-    var history: [AVAudioPCMBuffer] = []
+final class DiscoveryService {
+    private var listener: NWListener?
+    var listenerState: NWListener.State = .setup
     
-    private let engine = AVAudioEngine()
-    private let file = FileManager.default.temporaryDirectory.appending(path: "rec.caf")
+    private var browser: NWBrowser?
+    var browserState: NWBrowser.State = .setup
     
-    func record() {
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        let file = try? AVAudioFile(
-            forWriting: FileManager.default.temporaryDirectory.appending(path: "rec.caf"),
-            settings: format.settings
-        )
+    var discoveredPeers: [NWBrowser.Result] = []
+    
+    func startAdvertising() {
+        listener = try? NWListener(using: .udp)
+        listener?.service = NWListener.Service(name: "dev.heryan.multi-AV-inputs.AudioPlayground", type: "_avcontinuity._udp")
         
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { avAudioPCMBuffer, time in
-            try? file?.write(from: avAudioPCMBuffer)
+        listener?.stateUpdateHandler = { [weak self] newState in
+            self?.listenerState = newState
         }
         
-        do {
-            try engine.start()
-        } catch {
-            print("Error in starting engine: \(error)")
+        listener?.newConnectionHandler = { connection in
+            connection.start(queue: .main)
         }
+        listener?.start(queue: .main)
+    }
+    var isListenerActive: Bool {
+        if case .ready = listenerState {
+            return true
+        }
+        return false
     }
     
-    func stop() {
-        engine.inputNode.removeTap(onBus: 0 )
-        engine.stop()
+    func startBrowsing() {
+        browser = NWBrowser(for: .bonjour(type: "_avcontinuity._udp", domain: nil), using: .udp)
+        browser?.stateUpdateHandler = { [weak self] newState in
+            self?.browserState = newState
+        }
+        browser?.browseResultsChangedHandler = { [weak self] results, _ in
+            self?.discoveredPeers = Array(results)
+        }
+        browser?.start(queue: .main)
+    }
+    var isBrowserActive: Bool {
+        if case .ready = browserState {
+            return true
+        }
+        return false
     }
     
-    func play() {
-        let player = AVAudioPlayerNode()
-        let format = engine.inputNode.outputFormat(forBus: 0)
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: format)
-        
-        guard let readFile = try? AVAudioFile(forReading: file) else { return }
-        player.scheduleFile(readFile, at: nil)
-        try? engine.start()
-        player.play()
+    func stopBrowsing() {
+
+        browser?.cancel()
     }
     
-    func setup() {
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playAndRecord, options: [.defaultToSpeaker])
-        try? session.setActive(true)
+    func stopAdvertising() {
+
+        listener?.cancel()
     }
 }
 
 struct ContentView: View {
-    @State private var recorder = AudioBufferRecorder()
+    @State private var discoveryService = DiscoveryService()
     @State private var isRunning = false
     
     var body: some View {
         VStack(spacing: 16) {
-            Button(isRunning ? "Stop" : "Record") {
-                isRunning.toggle()
-                isRunning ? recorder.record() : recorder.stop()
+            Button("\(discoveryService.isListenerActive ? "Stop" : "Start") Listener") {
+                if discoveryService.isListenerActive {
+                    discoveryService.stopAdvertising()
+                } else {
+                    discoveryService.startAdvertising()
+                }
             }
-            Button("Play") {
-                recorder.play()
+            Button("\(discoveryService.isBrowserActive ? "Stop" : "Start") Browser") {
+                if discoveryService.isBrowserActive {
+                    discoveryService.stopBrowsing()
+                } else {
+                    discoveryService.startBrowsing()
+                }
             }
-        }
-        .onAppear {
-            recorder.setup()
+            List(discoveryService.discoveredPeers, id: \.endpoint) { result in
+                Text("\(result.endpoint)")
+            }
         }
         .padding()
     }
