@@ -14,6 +14,7 @@ import Crypto
 import X509
 import SwiftASN1
 import Security
+import VisionKit
 
 @Observable
 final class DiscoveryService {
@@ -27,9 +28,11 @@ final class DiscoveryService {
     
     var connection: NWConnection?
     
+    var connected: Bool = false
+    
     // MARK: - Host / Advertiser
     
-    private var qrCodeImage: CGImage?
+    var qrCodeImage: CGImage?
     var hostIdentity: SecIdentity?
     
     func makeServerQUICParameters(identity: SecIdentity) -> NWParameters {
@@ -65,45 +68,67 @@ final class DiscoveryService {
     }
     
     func loadOrCreateHostIdentity(label: String = "dev.heryan.avcontinuity.host") throws -> SecIdentity {
-        if let existing = try? findIdentity(label: label) { return existing } // // stable across launches
-        
+        if let existing = try? findIdentity() { return existing }
+
         let privateKey = P256.Signing.PrivateKey()
         let certKey = Certificate.PrivateKey(privateKey)
         let name = try DistinguishedName { CommonName(label) }
         let now = Date()
-        
         let extensions = try Certificate.Extensions {
-            Critical(BasicConstraints.isCertificateAuthority(maxPathLength: nil)) // irrelevant here — we never run system trust evaluation, only our pinning check
+            Critical(BasicConstraints.isCertificateAuthority(maxPathLength: nil))
             Critical(KeyUsage(digitalSignature: true, keyCertSign: true))
         }
-        
         let certificate = try Certificate(version: .v3, serialNumber: Certificate.SerialNumber(), publicKey: certKey.publicKey, notValidBefore: now, notValidAfter: now.addingTimeInterval(3650 * 24 * 3600), issuer: name, subject: name, signatureAlgorithm: .ecdsaWithSHA256, extensions: extensions, issuerPrivateKey: certKey)
-        
         let secCertificate = try SecCertificate.makeWithCertificate(certificate)
-        
+
+        let publicKeyBytes = privateKey.publicKey.x963Representation
+        let applicationLabel = Data(Insecure.SHA1.hash(data: publicKeyBytes))
+
         var keyError: Unmanaged<CFError>?
-        let keyAttrs: [String: Any] = [
+        let keyCreateAttrs: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
-            kSecAttrIsPermanent as String: true,
-            kSecAttrLabel as String: label
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate
         ]
-        guard SecKeyCreateWithData(privateKey.x963Representation as CFData, keyAttrs as CFDictionary, &keyError) != nil else {
+        guard let secKey = SecKeyCreateWithData(privateKey.x963Representation as CFData, keyCreateAttrs as CFDictionary, &keyError) else {
             throw keyError!.takeRetainedValue()
         }
-        
-        let addStatus = SecItemAdd([kSecClass: kSecClassCertificate, kSecValueRef: secCertificate, kSecAttrLabel: label] as CFDictionary, nil)
+
+        let keyAddStatus = SecItemAdd([
+            kSecClass: kSecClassKey,
+            kSecValueRef: secKey,
+            kSecAttrLabel: label,
+            kSecAttrApplicationLabel: applicationLabel,
+            kSecUseDataProtectionKeychain: true
+        ] as CFDictionary, nil)
+        guard keyAddStatus == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(keyAddStatus)) }
+
+        let addStatus = SecItemAdd([
+            kSecClass: kSecClassCertificate,
+            kSecValueRef: secCertificate,
+            kSecAttrLabel: label,
+            kSecUseDataProtectionKeychain: true
+        ] as CFDictionary, nil)
         guard addStatus == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(addStatus)) }
-        
-        return try findIdentity(label: label)
+
+        var certAttrsResult: CFTypeRef?
+        SecItemCopyMatching([
+            kSecClass: kSecClassCertificate,
+            kSecAttrLabel: label,
+            kSecUseDataProtectionKeychain: true,
+            kSecReturnAttributes: true
+        ] as CFDictionary, &certAttrsResult)
+        let certPubKeyHash = (certAttrsResult as? [String: Any])?[kSecAttrPublicKeyHash as String] as? Data
+
+        return try findIdentity()
     }
     
-    private func findIdentity(label: String) throws -> SecIdentity {
+    private func findIdentity() throws -> SecIdentity {
         var result: CFTypeRef?
         let status = SecItemCopyMatching([
             kSecClass: kSecClassIdentity,
             kSecReturnRef: true,
-            kSecMatchLimit: kSecMatchLimitOne
+            kSecMatchLimit: kSecMatchLimitOne,
+            kSecUseDataProtectionKeychain: true
         ] as CFDictionary, &result)
         guard status == errSecSuccess, let identity = result else {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
@@ -178,11 +203,22 @@ final class DiscoveryService {
     func startConnection(_ connection: NWConnection) {
         connection.stateUpdateHandler = { state in
             switch state {
+            case .setup:
+                print("Setup")
+            case .preparing:
+                print("Preparing (handshake in progress)")
+            case .waiting(let error):
+                print("Waiting: \(error)")
             case .ready:
+                self.connected = true
                 print("Connected")
                 self.sendPing()
             case .failed(let error):
+                self.connected = false
                 print("Error: \(error)")
+            case .cancelled:
+                self.connected = false
+                print("Cancelled")
             default: break
             }
         }
@@ -198,14 +234,24 @@ final class DiscoveryService {
     // MARK: - Shared
     
     func receive(_ connection: NWConnection) {
-        connection.receiveMessage { content, contentContext, isComplete, error in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { content, contentContext, isComplete, error in
             if let content, let msg = String(data: content, encoding: .utf8) {
                 print("Received: \(msg)")
             }
-            if error == nil {
-                self.receive(connection)
+            if let error {
+                print("Receive error: \(error)")
+                return
             }
+            self.receive(connection)
         }
+//        connection.receiveMessage { content, contentContext, isComplete, error in
+//            if let content, let msg = String(data: content, encoding: .utf8) {
+//                print("Received: \(msg)")
+//            }
+//            if error == nil {
+//                self.receive(connection)
+//            }
+//        }
     }
     
     func sendPing() {
@@ -225,26 +271,48 @@ struct ContentView: View {
     @State
     private var isRunning = false
     
+    @State
+    var isShowingScanner = false
+    var scannerAvailable: Bool {
+        DataScannerViewController.isSupported && DataScannerViewController.isAvailable
+    }
+    
     var body: some View {
         VStack(spacing: 16) {
+            if let cgImage = discoveryService.qrCodeImage, discoveryService.isListenerActive {
+                Image(decorative: cgImage, scale: 1)
+                    .interpolation(.none)   // keep QR modules crisp, don't blur-smooth them
+                    .resizable()
+                    .frame(width: 200, height: 200)
+            }
             Button("\(discoveryService.isListenerActive ? "Stop" : "Start") Listener") {
                 guard let identity = discoveryService.hostIdentity else { return }
                 discoveryService.isListenerActive
-                ? discoveryService.stopBrowsing()
+                ? discoveryService.stopAdvertising()
                 : discoveryService.startAdvertising(identity: identity)
             }
             .disabled(discoveryService.hostIdentity == nil)
-            if discoveryService.isListenerActive {
+            if discoveryService.isListenerActive, discoveryService.connected {
                 Button("Send Browser Ping") {
                     discoveryService.sendPing()
                 }
             }
             Button("\(discoveryService.isBrowserActive ? "Stop" : "Start") Browser") {
-                discoveryService.isBrowserActive
-                ? discoveryService.stopBrowsing()
-                : discoveryService.startBrowsing()
+                if discoveryService.isBrowserActive {
+                    discoveryService.stopBrowsing()
+                } else if scannerAvailable {
+                    isShowingScanner = true
+                }
             }
-            if discoveryService.isBrowserActive {
+            .disabled(!scannerAvailable && !discoveryService.isBrowserActive)
+            .sheet(isPresented: $isShowingScanner) {
+                QRScannerView { payload in
+                    isShowingScanner = false
+                    guard let pinnedHash = Data(base64Encoded: payload) else { return }
+                    discoveryService.startBrowsing(pinnedHash: pinnedHash)
+                }
+            }
+            if discoveryService.isBrowserActive, discoveryService.connected {
                 Button("Send Advertiser Ping") {
                     discoveryService.sendPing()
                 }
