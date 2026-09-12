@@ -7,6 +7,8 @@
 
 import SwiftUI
 import Network
+import Security
+import CryptoKit
 
 @Observable
 final class DiscoveryService {
@@ -20,8 +22,17 @@ final class DiscoveryService {
     
     var connection: NWConnection?
     
-    func startAdvertising() {
-        listener = try? NWListener(using: .udp)
+    // MARK: - Host
+    
+    func makeServerQUICParameters(identity: SecIdentity) -> NWParameters {
+        let quic = NWProtocolQUIC.Options(alpn: ["avcontinuity"])
+        guard let secIdentity = sec_identity_create(identity) else { fatalError("Bad identity") }
+        sec_protocol_options_set_local_identity(quic.securityProtocolOptions, secIdentity)
+        return NWParameters(quic: quic)
+    }
+    
+    func startAdvertising(identity: SecIdentity) {
+        listener = try? NWListener(using: makeServerQUICParameters(identity: identity))
         listener?.service = NWListener.Service(name: "dev.heryan.multi-AV-inputs.AudioPlayground", type: "_avcontinuity._udp")
         
         listener?.stateUpdateHandler = { [weak self] newState in
@@ -41,14 +52,35 @@ final class DiscoveryService {
         return false
     }
     
-    func startBrowsing() {
+    func stopBrowsing() {
+        browser?.cancel()
+    }
+    
+    // MARK: - Peer
+    
+    func makeClientQUICParameters(pinnedHash: Data) -> NWParameters {
+        let quic = NWProtocolQUIC.Options(alpn: ["avcontinuity"])
+        sec_protocol_options_set_verify_block(quic.securityProtocolOptions, { _, secTrust, complete in
+            let trust = sec_trust_copy_ref(secTrust).takeRetainedValue()
+            guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+                  let leaf = chain.first,
+                  let key = SecCertificateCopyKey(leaf),
+                  let keyData = SecKeyCopyExternalRepresentation(key, nil) as Data? else {
+                complete(false); return
+            }
+            complete(Data(SHA256.hash(data: keyData)) == pinnedHash)
+        }, .main)
+        return NWParameters(quic: quic)
+    }
+    
+    func startBrowsing(pinnedHash: Data) {
         browser = NWBrowser(for: .bonjour(type: "_avcontinuity._udp", domain: nil), using: .udp)
         browser?.stateUpdateHandler = { [weak self] newState in
             self?.browserState = newState
         }
         browser?.browseResultsChangedHandler = { [weak self] results, _ in
             guard let result = results.first else { return }
-            let connection = NWConnection(to: result.endpoint, using: .udp)
+            let connection = NWConnection(to: result.endpoint, using: self.makeClientQUICParameters(pinnedHash: pinnedHash))
             self?.startConnection(connection)
         }
         browser?.start(queue: .main)
@@ -76,6 +108,12 @@ final class DiscoveryService {
         receive(connection)
     }
     
+    func stopAdvertising() {
+        listener?.cancel()
+    }
+    
+    // MARK: - Shared
+    
     func receive(_ connection: NWConnection) {
         connection.receiveMessage { content, contentContext, isComplete, error in
             if let content, let msg = String(data: content, encoding: .utf8) {
@@ -96,20 +134,13 @@ final class DiscoveryService {
         }))
     }
     
-    func stopBrowsing() {
-        
-        browser?.cancel()
-    }
-    
-    func stopAdvertising() {
-        
-        listener?.cancel()
-    }
 }
 
 struct ContentView: View {
-    @State private var discoveryService = DiscoveryService()
-    @State private var isRunning = false
+    @State
+    private var discoveryService = DiscoveryService()
+    @State
+    private var isRunning = false
     
     var body: some View {
         VStack(spacing: 16) {
