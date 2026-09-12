@@ -18,6 +18,8 @@ final class DiscoveryService {
     
     var discoveredPeers: [NWBrowser.Result] = []
     
+    var connection: NWConnection?
+    
     func startAdvertising() {
         listener = try? NWListener(using: .udp)
         listener?.service = NWListener.Service(name: "dev.heryan.multi-AV-inputs.AudioPlayground", type: "_avcontinuity._udp")
@@ -27,8 +29,9 @@ final class DiscoveryService {
         }
         
         listener?.newConnectionHandler = { connection in
-            connection.start(queue: .main)
+            self.startConnection(connection)
         }
+        
         listener?.start(queue: .main)
     }
     var isListenerActive: Bool {
@@ -44,7 +47,9 @@ final class DiscoveryService {
             self?.browserState = newState
         }
         browser?.browseResultsChangedHandler = { [weak self] results, _ in
-            self?.discoveredPeers = Array(results)
+            guard let result = results.first else { return }
+            let connection = NWConnection(to: result.endpoint, using: .udp)
+            self?.startConnection(connection)
         }
         browser?.start(queue: .main)
     }
@@ -55,13 +60,49 @@ final class DiscoveryService {
         return false
     }
     
+    func startConnection(_ connection: NWConnection) {
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                print("Connected")
+                self.sendPing()
+            case .failed(let error):
+                print("Error: \(error)")
+            default: break
+            }
+        }
+        connection.start(queue: .main)
+        self.connection = connection
+        receive(connection)
+    }
+    
+    func receive(_ connection: NWConnection) {
+        connection.receiveMessage { content, contentContext, isComplete, error in
+            if let content, let msg = String(data: content, encoding: .utf8) {
+                print("Received: \(msg)")
+            }
+            if error == nil {
+                self.receive(connection)
+            }
+        }
+    }
+    
+    func sendPing() {
+        let data = "ping".data(using: .utf8)
+        self.connection?.send(content: data, completion: .contentProcessed({ error in
+            if let error {
+                print("Send error: \(error)")
+            }
+        }))
+    }
+    
     func stopBrowsing() {
-
+        
         browser?.cancel()
     }
     
     func stopAdvertising() {
-
+        
         listener?.cancel()
     }
 }
@@ -79,11 +120,21 @@ struct ContentView: View {
                     discoveryService.startAdvertising()
                 }
             }
+            if discoveryService.isListenerActive {
+                Button("Send Browser Ping") {
+                    discoveryService.sendPing()
+                }
+            }
             Button("\(discoveryService.isBrowserActive ? "Stop" : "Start") Browser") {
                 if discoveryService.isBrowserActive {
                     discoveryService.stopBrowsing()
                 } else {
                     discoveryService.startBrowsing()
+                }
+            }
+            if discoveryService.isBrowserActive {
+                Button("Send Advertiser Ping") {
+                    discoveryService.sendPing()
                 }
             }
             List(discoveryService.discoveredPeers, id: \.endpoint) { result in
