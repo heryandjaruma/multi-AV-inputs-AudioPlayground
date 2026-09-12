@@ -6,9 +6,14 @@
 //
 
 import SwiftUI
+import CoreImage.CIFilterBuiltins
+
 import Network
-import Security
 import CryptoKit
+import Crypto
+import X509
+import SwiftASN1
+import Security
 
 @Observable
 final class DiscoveryService {
@@ -22,7 +27,10 @@ final class DiscoveryService {
     
     var connection: NWConnection?
     
-    // MARK: - Host
+    // MARK: - Host / Advertiser
+    
+    private var qrCodeImage: CGImage?
+    var hostIdentity: SecIdentity?
     
     func makeServerQUICParameters(identity: SecIdentity) -> NWParameters {
         let quic = NWProtocolQUIC.Options(alpn: ["avcontinuity"])
@@ -56,7 +64,82 @@ final class DiscoveryService {
         browser?.cancel()
     }
     
-    // MARK: - Peer
+    func loadOrCreateHostIdentity(label: String = "dev.heryan.avcontinuity.host") throws -> SecIdentity {
+        if let existing = try? findIdentity(label: label) { return existing } // // stable across launches
+        
+        let privateKey = P256.Signing.PrivateKey()
+        let certKey = Certificate.PrivateKey(privateKey)
+        let name = try DistinguishedName { CommonName(label) }
+        let now = Date()
+        
+        let extensions = try Certificate.Extensions {
+            Critical(BasicConstraints.isCertificateAuthority(maxPathLength: nil)) // irrelevant here — we never run system trust evaluation, only our pinning check
+            Critical(KeyUsage(digitalSignature: true, keyCertSign: true))
+        }
+        
+        let certificate = try Certificate(version: .v3, serialNumber: Certificate.SerialNumber(), publicKey: certKey.publicKey, notValidBefore: now, notValidAfter: now.addingTimeInterval(3650 * 24 * 3600), issuer: name, subject: name, signatureAlgorithm: .ecdsaWithSHA256, extensions: extensions, issuerPrivateKey: certKey)
+        
+        let secCertificate = try SecCertificate.makeWithCertificate(certificate)
+        
+        var keyError: Unmanaged<CFError>?
+        let keyAttrs: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+            kSecAttrIsPermanent as String: true,
+            kSecAttrLabel as String: label
+        ]
+        guard SecKeyCreateWithData(privateKey.x963Representation as CFData, keyAttrs as CFDictionary, &keyError) != nil else {
+            throw keyError!.takeRetainedValue()
+        }
+        
+        let addStatus = SecItemAdd([kSecClass: kSecClassCertificate, kSecValueRef: secCertificate, kSecAttrLabel: label] as CFDictionary, nil)
+        guard addStatus == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(addStatus)) }
+        
+        return try findIdentity(label: label)
+    }
+    
+    private func findIdentity(label: String) throws -> SecIdentity {
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching([
+            kSecClass: kSecClassIdentity,
+            kSecReturnRef: true,
+            kSecMatchLimit: kSecMatchLimitOne
+        ] as CFDictionary, &result)
+        guard status == errSecSuccess, let identity = result else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+        return identity as! SecIdentity
+    }
+    
+    func fingerprint(of identity: SecIdentity) throws -> String {
+        var certRef: SecCertificate?
+        SecIdentityCopyCertificate(identity, &certRef)
+        guard let cert = certRef,
+              let key = SecCertificateCopyKey(cert),
+              let keyData = SecKeyCopyExternalRepresentation(key, nil) as Data? else {
+            throw NSError(domain: "fingerprint", code: -1)
+        }
+        return Data(SHA256.hash(data: keyData)).base64EncodedString()
+    }
+    
+    func qrCodeImage(for string: String) -> CGImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(string.utf8)
+        guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 10, y: 10)) else { return nil }
+        return CIContext().createCGImage(output, from: output.extent)
+    }
+    
+    func setupHost() {
+        do {
+            let identity = try loadOrCreateHostIdentity()
+            hostIdentity = identity
+            qrCodeImage = qrCodeImage(for: try fingerprint(of: identity))
+        } catch {
+            print("Host identity setup failed: \(error)")
+        }
+    }
+    
+    // MARK: - Peer / Client / Listener
     
     func makeClientQUICParameters(pinnedHash: Data) -> NWParameters {
         let quic = NWProtocolQUIC.Options(alpn: ["avcontinuity"])
@@ -145,23 +228,21 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 16) {
             Button("\(discoveryService.isListenerActive ? "Stop" : "Start") Listener") {
-                if discoveryService.isListenerActive {
-                    discoveryService.stopAdvertising()
-                } else {
-                    discoveryService.startAdvertising()
-                }
+                guard let identity = discoveryService.hostIdentity else { return }
+                discoveryService.isListenerActive
+                ? discoveryService.stopBrowsing()
+                : discoveryService.startAdvertising(identity: identity)
             }
+            .disabled(discoveryService.hostIdentity == nil)
             if discoveryService.isListenerActive {
                 Button("Send Browser Ping") {
                     discoveryService.sendPing()
                 }
             }
             Button("\(discoveryService.isBrowserActive ? "Stop" : "Start") Browser") {
-                if discoveryService.isBrowserActive {
-                    discoveryService.stopBrowsing()
-                } else {
-                    discoveryService.startBrowsing()
-                }
+                discoveryService.isBrowserActive
+                ? discoveryService.stopBrowsing()
+                : discoveryService.startBrowsing()
             }
             if discoveryService.isBrowserActive {
                 Button("Send Advertiser Ping") {
@@ -171,6 +252,9 @@ struct ContentView: View {
             List(discoveryService.discoveredPeers, id: \.endpoint) { result in
                 Text("\(result.endpoint)")
             }
+        }
+        .onAppear {
+            discoveryService.setupHost()
         }
         .padding()
     }
