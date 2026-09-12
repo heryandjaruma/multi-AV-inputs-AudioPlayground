@@ -78,10 +78,10 @@ final class DiscoveryService {
         browser?.stateUpdateHandler = { [weak self] newState in
             self?.browserState = newState
         }
-        browser?.browseResultsChangedHandler = { [weak self] results, _ in
+        browser?.browseResultsChangedHandler = { results, _ in
             guard let result = results.first else { return }
             let connection = NWConnection(to: result.endpoint, using: self.makeClientQUICParameters(pinnedHash: pinnedHash))
-            self?.startConnection(connection)
+            self.startConnection(connection)
         }
         browser?.start(queue: .main)
     }
