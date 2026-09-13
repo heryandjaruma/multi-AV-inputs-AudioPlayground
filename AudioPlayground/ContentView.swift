@@ -122,10 +122,11 @@ final class DiscoveryService {
         return try findIdentity()
     }
     
-    private func findIdentity() throws -> SecIdentity {
+    private func findIdentity(label: String = "dev.heryan.avcontinuity.host") throws -> SecIdentity {
         var result: CFTypeRef?
         let status = SecItemCopyMatching([
             kSecClass: kSecClassIdentity,
+            kSecAttrLabel: label,
             kSecReturnRef: true,
             kSecMatchLimit: kSecMatchLimitOne,
             kSecUseDataProtectionKeychain: true
