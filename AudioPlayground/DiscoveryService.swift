@@ -23,7 +23,9 @@ final class DiscoveryService {
     
     var discoveredPeers: [NWBrowser.Result] = []
     
-    var connection: NWConnection?
+    var connectionGroup: NWConnectionGroup?
+    var controlStream: NWConnection?
+    var audioStream: NWConnection?
     
     var connected: Bool = false
     
@@ -47,8 +49,8 @@ final class DiscoveryService {
             self?.listenerState = newState
         }
         
-        listener?.newConnectionHandler = { connection in
-            self.startConnection(connection)
+        listener?.newConnectionGroupHandler = { [weak self] groupConnection in
+            self?.handleIncomingGroup(groupConnection)
         }
         
         listener?.start(queue: .main)
@@ -59,6 +61,39 @@ final class DiscoveryService {
         }
         return false
     }
+    func handleIncomingGroup(_ group: NWConnectionGroup) {
+        group.stateUpdateHandler = { state in
+            switch state {
+            case .setup: break
+            case .waiting(let error): print("Group waiting: \(error)")
+            case .ready: print("Group ready")
+            case .failed(let error): print("Group failed: \(error)")
+            case .cancelled: print("Group cancelled")
+            default: break
+            }
+        }
+        group.newConnectionHandler = { [weak self] stream in
+            guard let self else { return }
+            var isFirstStream = self.controlStream == nil && self.audioStream == nil
+            stream.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    if isFirstStream {
+                        self.controlStream = stream
+                    } else {
+                        self.audioStream = stream
+                    }
+                    self.connected = true
+                case .failed, .cancelled:
+                    self.connected = false
+                default: break
+                }
+            }
+            stream.start(queue: .main)
+            self.receive(stream)
+        }
+        group.start(queue: .main)
+    }
     
     func stopBrowsing() {
         browser?.cancel()
@@ -66,7 +101,7 @@ final class DiscoveryService {
     
     func loadOrCreateHostIdentity(label: String = "dev.heryan.avcontinuity.host") throws -> SecIdentity {
         if let existing = try? findIdentity(label: label) { return existing }
-
+        
         let privateKey = P256.Signing.PrivateKey()
         let certKey = Certificate.PrivateKey(privateKey)
         let name = try DistinguishedName { CommonName(label) }
@@ -77,10 +112,10 @@ final class DiscoveryService {
         }
         let certificate = try Certificate(version: .v3, serialNumber: Certificate.SerialNumber(), publicKey: certKey.publicKey, notValidBefore: now, notValidAfter: now.addingTimeInterval(3650 * 24 * 3600), issuer: name, subject: name, signatureAlgorithm: .ecdsaWithSHA256, extensions: extensions, issuerPrivateKey: certKey)
         let secCertificate = try SecCertificate.makeWithCertificate(certificate)
-
+        
         let publicKeyBytes = privateKey.publicKey.x963Representation
         let applicationLabel = Data(Insecure.SHA1.hash(data: publicKeyBytes))
-
+        
         var keyError: Unmanaged<CFError>?
         let keyCreateAttrs: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
@@ -89,7 +124,7 @@ final class DiscoveryService {
         guard let secKey = SecKeyCreateWithData(privateKey.x963Representation as CFData, keyCreateAttrs as CFDictionary, &keyError) else {
             throw keyError!.takeRetainedValue()
         }
-
+        
         let keyAddStatus = SecItemAdd([
             kSecClass: kSecClassKey,
             kSecValueRef: secKey,
@@ -98,7 +133,7 @@ final class DiscoveryService {
             kSecUseDataProtectionKeychain: true
         ] as CFDictionary, nil)
         guard keyAddStatus == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(keyAddStatus)) }
-
+        
         let addStatus = SecItemAdd([
             kSecClass: kSecClassCertificate,
             kSecValueRef: secCertificate,
@@ -106,7 +141,7 @@ final class DiscoveryService {
             kSecUseDataProtectionKeychain: true
         ] as CFDictionary, nil)
         guard addStatus == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(addStatus)) }
-
+        
         var certAttrsResult: CFTypeRef?
         SecItemCopyMatching([
             kSecClass: kSecClassCertificate,
@@ -115,7 +150,7 @@ final class DiscoveryService {
             kSecReturnAttributes: true
         ] as CFDictionary, &certAttrsResult)
         let certPubKeyHash = (certAttrsResult as? [String: Any])?[kSecAttrPublicKeyHash as String] as? Data
-
+        
         return try findIdentity(label: label)
     }
     
@@ -186,8 +221,8 @@ final class DiscoveryService {
         }
         browser?.browseResultsChangedHandler = { results, _ in
             guard let result = results.first else { return }
-            let connection = NWConnection(to: result.endpoint, using: self.makeClientQUICParameters(pinnedHash: pinnedHash))
-            self.startConnection(connection)
+            let groupConnection = NWConnectionGroup(with: NWMultiplexGroup(to: result.endpoint), using: self.makeClientQUICParameters(pinnedHash: pinnedHash))
+            self.startConnectionGroup(groupConnection)
         }
         browser?.start(queue: .main)
     }
@@ -198,31 +233,27 @@ final class DiscoveryService {
         return false
     }
     
-    func startConnection(_ connection: NWConnection) {
-        connection.stateUpdateHandler = { state in
+    func startConnectionGroup(_ group: NWConnectionGroup) {
+        group.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
             switch state {
-            case .setup:
-                print("Setup")
-            case .preparing:
-                print("Preparing (handshake in progress)")
-            case .waiting(let error):
-                print("Waiting: \(error)")
             case .ready:
                 self.connected = true
-                print("Connected")
-                self.sendPing()
-            case .failed(let error):
+                let control = NWConnection(from: group)
+                let audio = NWConnection(from: group)
+                control?.stateUpdateHandler = { _ in } // TODO
+                audio?.stateUpdateHandler = { _ in } // TODO
+                control?.start(queue: .main)
+                audio?.start(queue: .main)
+                self.controlStream = control
+                self.audioStream = audio
+            case .failed, .cancelled:
                 self.connected = false
-                print("Error: \(error)")
-            case .cancelled:
-                self.connected = false
-                print("Cancelled")
             default: break
             }
         }
-        connection.start(queue: .main)
-        self.connection = connection
-        receive(connection)
+        group.start(queue: .main)
+        self.connectionGroup = group
     }
     
     func stopAdvertising() {
@@ -242,19 +273,11 @@ final class DiscoveryService {
             }
             self.receive(connection)
         }
-//        connection.receiveMessage { content, contentContext, isComplete, error in
-//            if let content, let msg = String(data: content, encoding: .utf8) {
-//                print("Received: \(msg)")
-//            }
-//            if error == nil {
-//                self.receive(connection)
-//            }
-//        }
     }
     
     func sendPing() {
         let data = "ping".data(using: .utf8)
-        self.connection?.send(content: data, completion: .contentProcessed({ error in
+        controlStream?.send(content: data, completion: .contentProcessed({ error in
             if let error {
                 print("Send error: \(error)")
             }
