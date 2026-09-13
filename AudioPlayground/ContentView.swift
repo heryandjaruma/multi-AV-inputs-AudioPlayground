@@ -68,7 +68,7 @@ final class DiscoveryService {
     }
     
     func loadOrCreateHostIdentity(label: String = "dev.heryan.avcontinuity.host") throws -> SecIdentity {
-        if let existing = try? findIdentity() { return existing }
+        if let existing = try? findIdentity(label: label) { return existing }
 
         let privateKey = P256.Signing.PrivateKey()
         let certKey = Certificate.PrivateKey(privateKey)
@@ -119,10 +119,10 @@ final class DiscoveryService {
         ] as CFDictionary, &certAttrsResult)
         let certPubKeyHash = (certAttrsResult as? [String: Any])?[kSecAttrPublicKeyHash as String] as? Data
 
-        return try findIdentity()
+        return try findIdentity(label: label)
     }
     
-    private func findIdentity(label: String = "dev.heryan.avcontinuity.host") throws -> SecIdentity {
+    private func findIdentity(label: String) throws -> SecIdentity {
         var result: CFTypeRef?
         let status = SecItemCopyMatching([
             kSecClass: kSecClassIdentity,
