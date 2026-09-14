@@ -12,11 +12,9 @@ import CoreImage.CIFilterBuiltins
 import VisionKit
 import Network
 
-
-
 struct ContentView: View {
-    @State
-    private var discoveryService = DiscoveryService()
+    @State private var discoveryController = ContentViewController()
+    
     @State
     private var isRunning = false
     
@@ -28,50 +26,51 @@ struct ContentView: View {
     
     var body: some View {
         VStack(spacing: 16) {
-            if let cgImage = discoveryService.qrCodeImage, discoveryService.isListenerActive {
+            // Listener
+            if let cgImage = discoveryController.discoveryService.qrCodeImage, discoveryController.discoveryService.isListenerActive, !discoveryController.discoveryService.connected {
                 Image(decorative: cgImage, scale: 1)
                     .interpolation(.none)
                     .resizable()
                     .frame(width: 200, height: 200)
             }
-            Button("\(discoveryService.isListenerActive ? "Stop" : "Start") Listener") {
-                guard let identity = discoveryService.hostIdentity else { return }
-                discoveryService.isListenerActive
-                ? discoveryService.stopAdvertising()
-                : discoveryService.startAdvertising(identity: identity)
+            
+            Button("\(discoveryController.discoveryService.isListenerActive ? "Stop" : "Start") Listener") {
+                guard let identity = discoveryController.discoveryService.hostIdentity else { return }
+                discoveryController.discoveryService.isListenerActive
+                ? discoveryController.discoveryService.stopAdvertising()
+                : discoveryController.discoveryService.startAdvertising(identity: identity)
             }
-            .disabled(discoveryService.hostIdentity == nil)
-            if discoveryService.isListenerActive, discoveryService.connected {
-                Button("Send Browser Ping") {
-                    discoveryService.sendPing()
-                }
+            .disabled(discoveryController.discoveryService.hostIdentity == nil)
+            
+            if discoveryController.discoveryService.isListenerActive, discoveryController.discoveryService.connected {
+                HostMonitorView(discoveryService: discoveryController.discoveryService)
             }
-            Button("\(discoveryService.isBrowserActive ? "Stop" : "Start") Browser") {
-                if discoveryService.isBrowserActive {
-                    discoveryService.stopBrowsing()
+            
+            // Browser
+            Button("\(discoveryController.discoveryService.isBrowserActive ? "Stop" : "Start") Browser") {
+                if discoveryController.discoveryService.isBrowserActive {
+                    discoveryController.discoveryService.stopBrowsing()
                 } else if scannerAvailable {
                     isShowingScanner = true
                 }
             }
-            .disabled(!scannerAvailable && !discoveryService.isBrowserActive)
+            .disabled(!scannerAvailable && !discoveryController.discoveryService.isBrowserActive)
             .sheet(isPresented: $isShowingScanner) {
                 QRScannerView { payload in
                     isShowingScanner = false
                     guard let pinnedHash = Data(base64Encoded: payload) else { return }
-                    discoveryService.startBrowsing(pinnedHash: pinnedHash)
+                    discoveryController.discoveryService.startBrowsing(pinnedHash: pinnedHash)
                 }
             }
-            if discoveryService.isBrowserActive, discoveryService.connected {
-                Button("Send Advertiser Ping") {
-                    discoveryService.sendPing()
-                }
+            if discoveryController.discoveryService.isBrowserActive, discoveryController.discoveryService.connected {
+                ClientMonitorView(discoveryService: discoveryController.discoveryService)
             }
-            List(discoveryService.discoveredPeers, id: \.endpoint) { result in
+            List(discoveryController.discoveryService.discoveredPeers, id: \.endpoint) { result in
                 Text("\(result.endpoint)")
             }
         }
         .onAppear {
-            discoveryService.setupHost()
+            discoveryController.discoveryService.setupHost()
         }
         .padding()
     }
@@ -79,4 +78,27 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+}
+
+
+// MARK: - Monitor View
+
+struct ClientMonitorView: View {
+    var discoveryService: DiscoveryService
+    var body: some View {
+        Text("Ready to transmit audio")
+        Button("Send Browser Ping") {
+            discoveryService.sendPing()
+        }
+    }
+}
+
+struct HostMonitorView: View {
+    var discoveryService: DiscoveryService
+    var body: some View {
+        Text("Ready to receive audio")
+        Button("Send Advertiser Ping") {
+            discoveryService.sendPing()
+        }
+    }
 }
