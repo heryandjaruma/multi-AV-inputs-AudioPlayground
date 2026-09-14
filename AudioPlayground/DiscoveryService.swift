@@ -210,7 +210,7 @@ final class DiscoveryService {
         parameters.includePeerToPeer = true
         return parameters
     }
-
+    
     func startBrowsing(pinnedHash: Data) {
         let browserParameters = NWParameters.udp
         browserParameters.includePeerToPeer = true
@@ -275,10 +275,10 @@ final class DiscoveryService {
     }
     
     // MARK: - Shared
-
+    
     private static let controlTag = "control"
     private static let audioTag = "audio"
-
+    
     private func sendTag(_ tag: String, on connection: NWConnection) {
         connection.send(content: tag.data(using: .utf8), completion: .contentProcessed({ error in
             if let error {
@@ -286,7 +286,7 @@ final class DiscoveryService {
             }
         }))
     }
-
+    
     private func identifyIncomingStream(_ stream: NWConnection) {
         stream.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, _, error in
             guard let self else { return }
@@ -310,7 +310,7 @@ final class DiscoveryService {
             self.receive(stream)
         }
     }
-
+    
     func receive(_ connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { content, contentContext, isComplete, error in
             if let content, let msg = String(data: content, encoding: .utf8) {

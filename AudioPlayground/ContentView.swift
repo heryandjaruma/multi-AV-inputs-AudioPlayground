@@ -30,7 +30,7 @@ struct ContentView: View {
         VStack(spacing: 16) {
             if let cgImage = discoveryService.qrCodeImage, discoveryService.isListenerActive {
                 Image(decorative: cgImage, scale: 1)
-                    .interpolation(.none)   // keep QR modules crisp, don't blur-smooth them
+                    .interpolation(.none)
                     .resizable()
                     .frame(width: 200, height: 200)
             }
