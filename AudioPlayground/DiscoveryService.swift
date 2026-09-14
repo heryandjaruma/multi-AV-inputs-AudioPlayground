@@ -26,7 +26,8 @@ final class DiscoveryService {
     
     var connectionGroup: NWConnectionGroup?
     var controlStream: NWConnection?
-    var audioStream: NWConnection?
+    var monitorStream: NWConnection?
+    var masterStream: NWConnection?
     
     var connected: Bool = false
     
@@ -43,7 +44,7 @@ final class DiscoveryService {
         parameters.includePeerToPeer = true
         return parameters
     }
-    
+
     func startAdvertising(identity: SecIdentity) {
         listener = try? NWListener(using: makeServerQUICParameters(identity: identity))
         listener?.service = NWListener.Service(name: "dev.heryan.multi-AV-inputs.AudioPlayground", type: "_avcontinuity._udp")
@@ -210,7 +211,7 @@ final class DiscoveryService {
         parameters.includePeerToPeer = true
         return parameters
     }
-    
+
     func startBrowsing(pinnedHash: Data) {
         let browserParameters = NWParameters.udp
         browserParameters.includePeerToPeer = true
@@ -239,22 +240,33 @@ final class DiscoveryService {
             case .ready:
                 self.connected = true
                 let control = NWConnection(from: group)
-                let audio = NWConnection(from: group)
+                let monitor = NWConnection(from: group)
+                let master = NWConnection(from: group)
+
                 control?.stateUpdateHandler = { [weak self] state in
-                    guard let self, case .ready = state else { return }
-                    self.connected = true
-                    self.sendTag(Self.controlTag, on: control!)
+                    guard let self else { return }
+                    switch state {
+                    case .ready:
+                        self.connected = true
+                        self.sendFramed(Data("ping".utf8), kind: .control, on: control!)
+                    case .failed, .cancelled:
+                        self.connected = false
+                    default: break
+                    }
                 }
-                audio?.stateUpdateHandler = { [weak self] state in
-                    guard let self, case .ready = state else { return }
-                    self.sendTag(Self.audioTag, on: audio!)
-                }
+                self.trackFailures(monitor)
+                self.trackFailures(master)
+
                 control?.start(queue: .main)
-                audio?.start(queue: .main)
+                monitor?.start(queue: .main)
+                master?.start(queue: .main)
                 if let control { self.receive(control) }
-                if let audio { self.receive(audio) }
+                if let monitor { self.receive(monitor) }
+                if let master { self.receive(master) }
+
                 self.controlStream = control
-                self.audioStream = audio
+                self.monitorStream = monitor
+                self.masterStream = master
             case .failed(let error):
                 print("Group failed: \(error)")
                 self.connected = false
@@ -275,62 +287,76 @@ final class DiscoveryService {
     }
     
     // MARK: - Shared
-    
-    private static let controlTag = "control"
-    private static let audioTag = "audio"
-    
-    private func sendTag(_ tag: String, on connection: NWConnection) {
-        connection.send(content: tag.data(using: .utf8), completion: .contentProcessed({ error in
+
+    private func trackFailures(_ connection: NWConnection?) {
+        connection?.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed, .cancelled:
+                self?.connected = false
+            default: break
+            }
+        }
+    }
+
+    private func sendFramed(_ data: Data, kind: AVKind, on connection: NWConnection) {
+        let header = AVHeader(kind: kind, length: UInt32(data.count))
+        connection.send(content: header.encoded + data, completion: .contentProcessed({ error in
             if let error {
-                print("Tag send error: \(error)")
+                print("Send error (\(kind)): \(error)")
             }
         }))
     }
-    
-    private func identifyIncomingStream(_ stream: NWConnection) {
-        stream.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, _, error in
-            guard let self else { return }
-            if let error {
-                print("Stream identify error: \(error)")
-                return
-            }
-            guard let content, let tag = String(data: content, encoding: .utf8) else {
-                return
-            }
-            switch tag {
-            case Self.controlTag:
-                self.controlStream = stream
-            case Self.audioTag:
-                self.audioStream = stream
-            default:
-                print("Unknown stream tag: \(tag)")
-                return
-            }
-            self.connected = true
-            self.receive(stream)
-        }
-    }
-    
-    func receive(_ connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { content, contentContext, isComplete, error in
-            if let content, let msg = String(data: content, encoding: .utf8) {
-                print("Received: \(msg)")
-            }
+
+    private func receiveOnce(_ connection: NWConnection, completion: @escaping (AVKind, Data) -> Void) {
+        connection.receive(minimumIncompleteLength: AVHeader.size, maximumLength: AVHeader.size) { content, _, _, error in
             if let error {
                 print("Receive error: \(error)")
                 return
             }
+            guard let content, let header = AVHeader(content) else { return }
+            guard header.length > 0 else {
+                completion(header.kind, Data())
+                return
+            }
+            connection.receive(minimumIncompleteLength: Int(header.length), maximumLength: Int(header.length)) { payload, _, _, error in
+                if let error {
+                    print("Receive error: \(error)")
+                    return
+                }
+                completion(header.kind, payload ?? Data())
+            }
+        }
+    }
+
+    private func identifyIncomingStream(_ stream: NWConnection) {
+        receiveOnce(stream) { [weak self] kind, data in
+            guard let self else { return }
+            switch kind {
+            case .control: self.controlStream = stream
+            case .monitor: self.monitorStream = stream
+            case .master: self.masterStream = stream
+            }
+            self.connected = true
+            if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                print("Received [\(kind)]: \(text)")
+            }
+            self.receive(stream)
+        }
+    }
+
+    func receive(_ connection: NWConnection) {
+        receiveOnce(connection) { [weak self] kind, data in
+            guard let self else { return }
+            if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                print("Received [\(kind)]: \(text)")
+            }
             self.receive(connection)
         }
     }
-    
+
     func sendPing() {
-        let data = "ping".data(using: .utf8)
-        controlStream?.send(content: data, completion: .contentProcessed({ error in
-            if let error {
-                print("Send error: \(error)")
-            }
-        }))
+        guard let controlStream else { return }
+        sendFramed(Data("ping".utf8), kind: .control, on: controlStream)
     }
-    
+
 }
