@@ -8,6 +8,7 @@
 import Foundation
 import AVFoundation
 
+@MainActor
 @Observable
 class ContentViewController {
     var discoveryService = DiscoveryService()
@@ -17,15 +18,17 @@ class ContentViewController {
     var audioPlaybackService = AudioPlaybackService()
 
     init() {
-        audioCaptureService.onAudioCaptured = { [weak self] buffer, _ in
-            guard let self, let packet = buffer.encodedForTransport() else { return }
-            DispatchQueue.main.async {
-                self.discoveryService.sendMonitorAudio(packet)
-            }
+        let discoveryService = discoveryService // hoist a local, non-isolated ref
+        audioCaptureService.onAudioCaptured = { buffer, _ in
+            guard let packet = buffer.encodedForTransport() else { return }
+            discoveryService.sendMonitorAudio(packet)
+            discoveryService.sendMasterAudio(packet)
         }
 
         discoveryService.onAudioReceived = { [weak self] buffer in
-            self?.audioPlaybackService.play(buffer)
+            Task {
+                self?.audioPlaybackService.play(buffer)                
+            }
         }
     }
 }

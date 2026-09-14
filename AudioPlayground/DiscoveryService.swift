@@ -34,8 +34,6 @@ final class DiscoveryService {
 
     var onAudioReceived: ((AVAudioPCMBuffer) -> Void)?
 
-    private var isSendingAudio = false
-    
     // MARK: - Host / Advertiser
     
     var qrCodeImage: CGImage?
@@ -371,12 +369,43 @@ final class DiscoveryService {
         guard let controlStream else { return }
         sendFramed(Data("ping".utf8), kind: .control, on: controlStream)
     }
+    
+    // MARK: - SENDING
+    private var stateQueue = DispatchQueue(label: "discovery.audio.state")
 
+    // MARK: - Monitor Audio
+    private var isSendingMonitor = false
     func sendMonitorAudio(_ data: Data) {
-        guard let monitorStream, !isSendingAudio else { return }
-        isSendingAudio = true
-        sendFramed(data, kind: .monitor, on: monitorStream) { [weak self] in
-            self?.isSendingAudio = false
+        stateQueue.async { [weak self] in
+            guard let self, let monitorStream, !self.isSendingMonitor else { return }
+            self.isSendingMonitor = true
+            self.sendFramed(data, kind: .monitor, on: monitorStream) {
+                self.stateQueue.async {
+                    self.isSendingMonitor = false
+                }
+            }
+        }
+    }
+    
+    
+    // MARK: - Master Audio
+    private var masterQueue: [Data] = []
+    private var isSendingMaster = false
+    func sendMasterAudio(_ data: Data) {
+        stateQueue.async { [weak self] in
+            self?.masterQueue.append(data)
+            self?.drainMaster()
+        }
+    }
+    func drainMaster() {
+        guard let masterStream, !isSendingMaster, let next = masterQueue.first else { return }
+        isSendingMaster = true
+        masterQueue.removeFirst()
+        sendFramed(next, kind: .master, on: masterStream) { [weak self] in
+            self?.stateQueue.async {
+                self?.isSendingMonitor = false
+                self?.drainMaster()
+            }
         }
     }
 
