@@ -43,7 +43,7 @@ struct ContentView: View {
             .disabled(discoveryController.discoveryService.hostIdentity == nil)
             
             if discoveryController.discoveryService.isListenerActive, discoveryController.discoveryService.connected {
-                HostMonitorView(discoveryService: discoveryController.discoveryService)
+                HostMonitorView(discoveryService: discoveryController.discoveryService, audioPlaybackService: discoveryController.audioPlaybackService)
             }
             
             // Browser
@@ -63,7 +63,7 @@ struct ContentView: View {
                 }
             }
             if discoveryController.discoveryService.isBrowserActive, discoveryController.discoveryService.connected {
-                ClientMonitorView(discoveryService: discoveryController.discoveryService)
+                ClientMonitorView(discoveryService: discoveryController.discoveryService, audioCaptureService: discoveryController.audioCaptureService)
             }
             List(discoveryController.discoveryService.discoveredPeers, id: \.endpoint) { result in
                 Text("\(result.endpoint)")
@@ -85,20 +85,33 @@ struct ContentView: View {
 
 struct ClientMonitorView: View {
     var discoveryService: DiscoveryService
+    var audioCaptureService: AudioCaptureService
+
+    @State private var isSendingAudio = false
+
     var body: some View {
         Text("Ready to transmit audio")
         Button("Send Browser Ping") {
             discoveryService.sendPing()
+        }
+        Button(isSendingAudio ? "Stop Sending Audio" : "Start Sending Audio") {
+            isSendingAudio.toggle()
+            isSendingAudio ? audioCaptureService.start() : audioCaptureService.stop()
         }
     }
 }
 
 struct HostMonitorView: View {
     var discoveryService: DiscoveryService
+    var audioPlaybackService: AudioPlaybackService
+
     var body: some View {
         Text("Ready to receive audio")
         Button("Send Advertiser Ping") {
             discoveryService.sendPing()
+        }
+        .onAppear {
+            audioPlaybackService.start()
         }
     }
 }

@@ -12,6 +12,7 @@ import X509
 import SwiftASN1
 import Security
 import SwiftUI
+import AVFoundation
 import CoreImage.CIFilterBuiltins
 
 @Observable
@@ -30,6 +31,10 @@ final class DiscoveryService {
     var masterStream: NWConnection?
     
     var connected: Bool = false
+
+    var onAudioReceived: ((AVAudioPCMBuffer) -> Void)?
+
+    private var isSendingAudio = false
     
     // MARK: - Host / Advertiser
     
@@ -298,12 +303,13 @@ final class DiscoveryService {
         }
     }
 
-    private func sendFramed(_ data: Data, kind: AVKind, on connection: NWConnection) {
+    private func sendFramed(_ data: Data, kind: AVKind, on connection: NWConnection, completion: (() -> Void)? = nil) {
         let header = AVHeader(kind: kind, length: UInt32(data.count))
         connection.send(content: header.encoded + data, completion: .contentProcessed({ error in
             if let error {
                 print("Send error (\(kind)): \(error)")
             }
+            completion?()
         }))
     }
 
@@ -337,9 +343,7 @@ final class DiscoveryService {
             case .master: self.masterStream = stream
             }
             self.connected = true
-            if let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                print("Received [\(kind)]: \(text)")
-            }
+            self.handleReceived(kind: kind, data: data)
             self.receive(stream)
         }
     }
@@ -347,16 +351,33 @@ final class DiscoveryService {
     func receive(_ connection: NWConnection) {
         receiveOnce(connection) { [weak self] kind, data in
             guard let self else { return }
-            if let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                print("Received [\(kind)]: \(text)")
-            }
+            self.handleReceived(kind: kind, data: data)
             self.receive(connection)
+        }
+    }
+
+    private func handleReceived(kind: AVKind, data: Data) {
+        if kind == .monitor {
+            guard let buffer = AVAudioPCMBuffer.decodeTransport(data) else { return }
+            onAudioReceived?(buffer)
+            return
+        }
+        if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+            print("Received [\(kind)]: \(text)")
         }
     }
 
     func sendPing() {
         guard let controlStream else { return }
         sendFramed(Data("ping".utf8), kind: .control, on: controlStream)
+    }
+
+    func sendMonitorAudio(_ data: Data) {
+        guard let monitorStream, !isSendingAudio else { return }
+        isSendingAudio = true
+        sendFramed(data, kind: .monitor, on: monitorStream) { [weak self] in
+            self?.isSendingAudio = false
+        }
     }
 
 }
