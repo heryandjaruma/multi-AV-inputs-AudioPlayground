@@ -8,88 +8,69 @@
 import Network
 import Foundation
 
-enum ControlMessageType: UInt32 {
-    case ping = 1
-    case pong = 2
-    case acceptConnection = 3
+enum AVKind: UInt8 {
+    case control = 1, monitor = 2, master = 3
 }
 
 extension NWProtocolFramer.Message {
-    convenience init(type: ControlMessageType) {
-        self.init(definition: ControlProtocolFramer.definition)
-        self["type"] = type
+    convenience init(_ kind: AVKind) {
+        self.init(definition: AVLinkFramer.definition)
+        self["kind"] = kind
     }
-    var type: ControlMessageType {
-        get { self["type"] as? ControlMessageType ?? .ping}
-        set { self["type"] = newValue}
-    }
+    var kind: AVKind { self["kind"] as? AVKind ?? .control }
 }
 
-struct ControlHeader {
-    let type: UInt32
+struct AVHeader {
+    let kind: AVKind
     let length: UInt32
-    static let size = 8
-    
-    init(type: UInt32, length: UInt32) {
-        self.type = type
+    static let size = 5
+
+    init(kind: AVKind, length: UInt32) {
+        self.kind = kind
         self.length = length
     }
-    init(_ buffer: UnsafeMutableRawBufferPointer) {
-        var t: UInt32 = 0, l: UInt32 = 0
-        withUnsafeMutableBytes(of: &t) {
-            $0.copyMemory(from: UnsafeRawBufferPointer(start: buffer.baseAddress!, count: 4))
-        }
-        withUnsafeMutableBytes(of: &l) {
-            $0.copyMemory(from: UnsafeRawBufferPointer(start: buffer.baseAddress!.advanced(by: 4), count: 4))
-        }
-        type = t; length = l
+    init?(_ buffer: UnsafeMutableRawBufferPointer) {
+        guard buffer.count >= Self.size, let k = AVKind(rawValue: buffer[0]) else { return nil }
+        kind = k
+        length = UInt32(bigEndian: buffer.loadUnaligned(fromByteOffset: 1, as: UInt32.self))
     }
     var encoded: Data {
-        var t = type, l = length
-        return Data(bytes: &t, count: 4) + Data(bytes: &l, count: 4)
+        var l = length.bigEndian
+        return Data([kind.rawValue]) + Data(bytes: &l, count: 4)
     }
 }
 
-final class ControlProtocolFramer: NWProtocolFramerImplementation {
-    static let label = "Control"
-    static let definition = NWProtocolFramer.Definition(implementation: ControlProtocolFramer.self)
-    
-    init(framer: NWProtocolFramer.Instance) {
-        
-    }
-    func start(framer: NWProtocolFramer.Instance) -> NWProtocolFramer.StartResult {
-        .ready
-    }
-    func wakeup(framer: NWProtocolFramer.Instance) {
-        
-    }
-    func stop(framer: NWProtocolFramer.Instance) -> Bool {
-        true
-    }
-    func cleanup(framer: NWProtocolFramer.Instance) {
-        
-    }
-    
+final class AVLinkFramer: NWProtocolFramerImplementation {
+    static let definition = NWProtocolFramer.Definition(implementation: AVLinkFramer.self)
+    static let label = "AVLink"
+
+    init(framer: NWProtocolFramer.Instance) {}
+    func start(framer: NWProtocolFramer.Instance) -> NWProtocolFramer.StartResult { .ready }
+    func wakeup(framer: NWProtocolFramer.Instance) {}
+    func stop(framer: NWProtocolFramer.Instance) -> Bool { true }
+    func cleanup(framer: NWProtocolFramer.Instance) {}
+
     func handleInput(framer: NWProtocolFramer.Instance) -> Int {
         while true {
-            var header: ControlHeader?
-            let parsed = framer.parseInput(minimumIncompleteLength: ControlHeader.size, maximumLength: ControlHeader.size) { buffer, isComplete in
-                guard let buffer, buffer.count >= ControlHeader.size else { return 0 }
-                header = ControlHeader(buffer)
-                return ControlHeader.size
+            var header: AVHeader?
+            let parsed = framer.parseInput(minimumIncompleteLength: AVHeader.size,
+                                           maximumLength: AVHeader.size) { buffer, _ in
+                guard let buffer, let h = AVHeader(buffer) else { return 0 }
+                header = h
+                return AVHeader.size
             }
-            guard parsed, let header else { return ControlHeader.size }
-            
-            let type = ControlMessageType(rawValue: header.type) ?? .ping
-            let message = NWProtocolFramer.Message(type: type)
+            guard parsed, let header else { return AVHeader.size }
+
+            let message = NWProtocolFramer.Message(header.kind)
             if !framer.deliverInputNoCopy(length: Int(header.length), message: message, isComplete: true) {
                 return 0
             }
         }
     }
-    
-    func handleOutput(framer: NWProtocolFramer.Instance, message: NWProtocolFramer.Message, messageLength: Int, isComplete: Bool) {
-        let header = ControlHeader(type: message.type.rawValue, length: UInt32(messageLength))
+
+    func handleOutput(framer: NWProtocolFramer.Instance, message: NWProtocolFramer.Message,
+                      messageLength: Int, isComplete: Bool) {
+        let header = AVHeader(kind: message.kind, length: UInt32(messageLength))
         framer.writeOutput(data: header.encoded)
         try? framer.writeOutputNoCopy(length: messageLength)
     }
