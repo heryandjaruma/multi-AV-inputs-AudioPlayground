@@ -12,6 +12,7 @@ import X509
 import SwiftASN1
 import Security
 import SwiftUI
+import CoreImage.CIFilterBuiltins
 
 @Observable
 final class DiscoveryService {
@@ -74,23 +75,15 @@ final class DiscoveryService {
         }
         group.newConnectionHandler = { [weak self] stream in
             guard let self else { return }
-            var isFirstStream = self.controlStream == nil && self.audioStream == nil
             stream.stateUpdateHandler = { state in
                 switch state {
-                case .ready:
-                    if isFirstStream {
-                        self.controlStream = stream
-                    } else {
-                        self.audioStream = stream
-                    }
-                    self.connected = true
                 case .failed, .cancelled:
                     self.connected = false
                 default: break
                 }
             }
             stream.start(queue: .main)
-            self.receive(stream)
+            self.identifyIncomingStream(stream)
         }
         group.start(queue: .main)
     }
@@ -241,16 +234,31 @@ final class DiscoveryService {
                 self.connected = true
                 let control = NWConnection(from: group)
                 let audio = NWConnection(from: group)
-                control?.stateUpdateHandler = { _ in } // TODO
-                audio?.stateUpdateHandler = { _ in } // TODO
+                control?.stateUpdateHandler = { [weak self] state in
+                    guard let self, case .ready = state else { return }
+                    self.connected = true
+                    self.sendTag(Self.controlTag, on: control!)
+                }
+                audio?.stateUpdateHandler = { [weak self] state in
+                    guard let self, case .ready = state else { return }
+                    self.sendTag(Self.audioTag, on: audio!)
+                }
                 control?.start(queue: .main)
                 audio?.start(queue: .main)
+                if let control { self.receive(control) }
+                if let audio { self.receive(audio) }
                 self.controlStream = control
                 self.audioStream = audio
-            case .failed, .cancelled:
+            case .failed(let error):
+                print("Group failed: \(error)")
+                self.connected = false
+            case .cancelled:
                 self.connected = false
             default: break
             }
+        }
+        group.newConnectionHandler = { stream in
+            print("Unexpected incoming stream from host (id: \(ObjectIdentifier(stream)))")
         }
         group.start(queue: .main)
         self.connectionGroup = group
@@ -261,7 +269,42 @@ final class DiscoveryService {
     }
     
     // MARK: - Shared
-    
+
+    private static let controlTag = "control"
+    private static let audioTag = "audio"
+
+    private func sendTag(_ tag: String, on connection: NWConnection) {
+        connection.send(content: tag.data(using: .utf8), completion: .contentProcessed({ error in
+            if let error {
+                print("Tag send error: \(error)")
+            }
+        }))
+    }
+
+    private func identifyIncomingStream(_ stream: NWConnection) {
+        stream.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, _, error in
+            guard let self else { return }
+            if let error {
+                print("Stream identify error: \(error)")
+                return
+            }
+            guard let content, let tag = String(data: content, encoding: .utf8) else {
+                return
+            }
+            switch tag {
+            case Self.controlTag:
+                self.controlStream = stream
+            case Self.audioTag:
+                self.audioStream = stream
+            default:
+                print("Unknown stream tag: \(tag)")
+                return
+            }
+            self.connected = true
+            self.receive(stream)
+        }
+    }
+
     func receive(_ connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { content, contentContext, isComplete, error in
             if let content, let msg = String(data: content, encoding: .utf8) {
