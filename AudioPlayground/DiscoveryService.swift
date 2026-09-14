@@ -403,7 +403,7 @@ final class DiscoveryService {
         masterQueue.removeFirst()
         sendFramed(next, kind: .master, on: masterStream) { [weak self] in
             self?.stateQueue.async {
-                self?.isSendingMonitor = false
+                self?.isSendingMaster = false
                 self?.drainMaster()
             }
         }
