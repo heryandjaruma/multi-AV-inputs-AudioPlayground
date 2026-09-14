@@ -39,7 +39,9 @@ final class DiscoveryService {
         let quic = NWProtocolQUIC.Options(alpn: ["avcontinuity"])
         guard let secIdentity = sec_identity_create(identity) else { fatalError("Bad identity") }
         sec_protocol_options_set_local_identity(quic.securityProtocolOptions, secIdentity)
-        return NWParameters(quic: quic)
+        let parameters = NWParameters(quic: quic)
+        parameters.includePeerToPeer = true
+        return parameters
     }
     
     func startAdvertising(identity: SecIdentity) {
@@ -204,11 +206,15 @@ final class DiscoveryService {
             }
             complete(Data(SHA256.hash(data: keyData)) == pinnedHash)
         }, .main)
-        return NWParameters(quic: quic)
+        let parameters = NWParameters(quic: quic)
+        parameters.includePeerToPeer = true
+        return parameters
     }
-    
+
     func startBrowsing(pinnedHash: Data) {
-        browser = NWBrowser(for: .bonjour(type: "_avcontinuity._udp", domain: nil), using: .udp)
+        let browserParameters = NWParameters.udp
+        browserParameters.includePeerToPeer = true
+        browser = NWBrowser(for: .bonjour(type: "_avcontinuity._udp", domain: nil), using: browserParameters)
         browser?.stateUpdateHandler = { [weak self] newState in
             self?.browserState = newState
         }

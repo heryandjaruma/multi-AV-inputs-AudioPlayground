@@ -6,5 +6,7 @@
 	<array>
 		<string>_avcontinuity._udp</string>
 	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>AudioPlayground uses the local network to discover and connect to nearby devices for streaming audio.</string>
 </dict>
 </plist>
