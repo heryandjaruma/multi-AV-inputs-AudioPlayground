@@ -12,9 +12,14 @@ struct ContentView: View {
     var body: some View {
         VStack {
             Color.black
-                .onAppear {
-                    controller.start()
-                }
+            Button("Start Recording") {
+                controller.start()
+            }
+            .disabled(controller.started)
+            
+            Button("Stop and Save") {
+                controller.stop()
+            }
         }
         .padding()
     }
